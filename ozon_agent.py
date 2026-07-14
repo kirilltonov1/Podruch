@@ -32,18 +32,50 @@ def get_analytics(date_from, date_to):
         ],
         "limit": 1000
     }
-    r = requests.post(url, json=body, headers=HEADERS, timeout=30)
-    return r.json()
+    try:
+        r = requests.post(url, json=body, headers=HEADERS, timeout=30)
+        if r.status_code == 200:
+            return r.json()
+        else:
+            return {"result": {"data": []}}
+    except Exception:
+        return {"result": {"data": []}}
 
 
 def get_campaign_stats(date_from, date_to):
-    url = "https://api-seller.ozon.ru/v1/statistics/expenses"
+    url = "https://api-seller.ozon.ru/v1/analytics/data"
     body = {
-        "dateFrom": date_from,
-        "dateTo": date_to
+        "date_from": date_from,
+        "date_to": date_to,
+        "dimension": ["sku"],
+        "metrics": [
+            "adv_sum_all",
+            "revenue"
+        ],
+        "limit": 1000
     }
-    r = requests.post(url, json=body, headers=HEADERS, timeout=30)
-    return r.json()
+    try:
+        r = requests.post(url, json=body, headers=HEADERS, timeout=30)
+        if r.status_code == 200:
+            data = r.json()
+            camps = []
+            for item in data.get("result", {}).get("data", []):
+                sku = item.get("dimensions", [{}])[0].get("id", "")
+                name = item.get("dimensions", [{}])[0].get("name", sku)
+                metrics = item.get("metrics", [0, 0])
+                expense = metrics[0] if len(metrics) > 0 else 0
+                revenue = metrics[1] if len(metrics) > 1 else 0
+                camps.append({
+                    "id": sku,
+                    "title": name,
+                    "expense": expense,
+                    "revenue": revenue
+                })
+            return {"data": camps}
+        else:
+            return {"data": []}
+    except Exception:
+        return {"data": []}
 
 
 def calc_conversion(a, b):
