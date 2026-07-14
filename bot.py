@@ -5,12 +5,18 @@ from telegram import Update
 from telegram.ext import Application, MessageHandler, CommandHandler, filters, ContextTypes
 from database import Database
 from datetime import datetime
+import asyncio
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from ozon_agent import run_daily_brief
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 db = Database()
 client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
+
+# Твой Telegram ID — узнаешь написав /start боту
+OWNER_CHAT_ID = os.environ.get("OWNER_CHAT_ID")
 
 SYSTEM_PROMPT = """Ты личный помощник по имени Подручный. Ты помогаешь пользователю управлять задачами, напоминаниями и запоминаешь важную информацию о нём.
 
@@ -19,33 +25,37 @@ SYSTEM_PROMPT = """Ты личный помощник по имени Подру
 Отвечай кратко, по-русски, дружелюбно."""
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
     await update.message.reply_text(
-        "Привет! Я Подручный — твой личный помощник 🤖\n\n"
-        "Я могу:\n"
-        "• Отвечать на вопросы\n"
-        "• Запоминать важную информацию о тебе\n"
-        "• Напоминать о задачах\n\n"
-        "Просто напиши мне что нужно!"
+        f"Привет! Я Подручный 🤖\n\n"
+        f"Твой Chat ID: `{chat_id}`\n\n"
+        f"Команды:\n"
+        f"/brief — получить аналитику Ozon прямо сейчас\n"
+        f"/memory — что я о тебе знаю\n"
+        f"/tasks — твои задачи\n"
+        f"/clear — очистить историю",
+        parse_mode="Markdown"
     )
+
+async def brief_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    await update.message.reply_text("⏳ Собираю данные с Ozon, подожди минуту...")
+    await run_daily_brief(chat_id)
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     user_message = update.message.text
     
-    # Сохраняем сообщение пользователя
     db.add_message(user_id, "user", user_message)
     
-    # Получаем историю и память
     history = db.get_history(user_id, limit=20)
     memory = db.get_memory(user_id)
     
-    # Формируем системный промпт с памятью
     system = SYSTEM_PROMPT
     if memory:
         system += f"\n\nЧто ты знаешь о пользователе:\n{memory}"
     system += f"\n\nТекущая дата и время: {datetime.now().strftime('%d.%m.%Y %H:%M')}"
     
-    # Проверяем команды памяти и задач
     lower_msg = user_message.lower()
     
     if any(word in lower_msg for word in ["запомни", "запомнить", "не забудь что"]):
@@ -54,7 +64,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if any(word in lower_msg for word in ["напомни", "напоминание", "напомнить"]):
         db.add_task(user_id, user_message)
     
-    # Отправляем в Claude
     try:
         response = client.messages.create(
             model="claude-haiku-4-5-20251001",
@@ -67,9 +76,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Claude error: {e}")
         reply = "Что-то пошло не так, попробуй ещё раз 🙏"
     
-    # Сохраняем ответ
     db.add_message(user_id, "assistant", reply)
-    
     await update.message.reply_text(reply)
 
 async def memory_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -78,7 +85,7 @@ async def memory_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if memory:
         await update.message.reply_text(f"🧠 Вот что я о тебе знаю:\n\n{memory}")
     else:
-        await update.message.reply_text("Я пока ничего не запомнил о тебе. Расскажи что-нибудь!")
+        await update.message.reply_text("Я пока ничего не запомнил о тебе!")
 
 async def tasks_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -89,12 +96,12 @@ async def tasks_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text += f"{i}. {task}\n"
         await update.message.reply_text(text)
     else:
-        await update.message.reply_text("У тебя пока нет задач! Скажи мне что нужно сделать.")
+        await update.message.reply_text("У тебя пока нет задач!")
 
 async def clear_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     db.clear_history(user_id)
-    await update.message.reply_text("История очищена! Начинаем с чистого листа 🆕")
+    await update.message.reply_text("История очищена! 🆕")
 
 def main():
     token = os.environ.get("TELEGRAM_TOKEN")
@@ -103,11 +110,26 @@ def main():
     
     app = Application.builder().token(token).build()
     
+    # Команды
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("brief", brief_command))
     app.add_handler(CommandHandler("memory", memory_command))
     app.add_handler(CommandHandler("tasks", tasks_command))
     app.add_handler(CommandHandler("clear", clear_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    
+    # Расписание — бриф каждый день в 8:00
+    scheduler = AsyncIOScheduler()
+    if OWNER_CHAT_ID:
+        scheduler.add_job(
+            run_daily_brief,
+            'cron',
+            hour=8,
+            minute=0,
+            args=[int(OWNER_CHAT_ID)]
+        )
+        scheduler.start()
+        logger.info("Расписание установлено: бриф каждый день в 8:00")
     
     logger.info("Бот запущен!")
     app.run_polling()
