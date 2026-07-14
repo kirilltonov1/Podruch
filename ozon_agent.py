@@ -33,7 +33,7 @@ def get_analytics(date_from, date_to):
         ],
         "limit": 1000
     }
-    r = requests.post(url, json=body, headers=HEADERS)
+   r = requests.post(url, json=body, headers=HEADERS, timeout=30)
     return r.json()
 
 def get_campaigns():
